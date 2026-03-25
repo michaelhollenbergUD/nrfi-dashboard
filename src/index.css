@@ -1,0 +1,73 @@
+:root {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --card2: #334155;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --accent: #3b82f6;
+  --green: #22c55e;
+  --red: #ef4444;
+  --bar-bg: #334155;
+  --border: #475569;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.dash { max-width: 1100px; margin: 0 auto; padding: 20px 16px; }
+.hdr { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.title { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+.sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+.date-nav { display: flex; align-items: center; gap: 8px; position: relative; }
+.date-nav button { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: 700; }
+.date-nav button:hover { background: var(--card2); }
+.date-btn { padding: 6px 14px; border-radius: 8px; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+
+.cal-overlay { position: fixed; inset: 0; z-index: 99; }
+.cal { position: absolute; top: 100%; right: 0; margin-top: 8px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; z-index: 100; width: 320px; box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
+.cal-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.cal-hdr span { font-size: 15px; font-weight: 700; }
+.cal-hdr button { background: none; border: 1px solid var(--border); width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; }
+.cal-dow { font-size: 11px; color: var(--muted); font-weight: 600; padding: 4px 0; }
+.cal-day { font-size: 13px; padding: 7px 0; border-radius: 6px; cursor: pointer; color: var(--text); background: none; border: none; width: 100%; }
+.cal-day:hover { background: var(--card2); }
+.cal-day.selected { background: var(--accent); color: #fff; font-weight: 700; }
+.cal-day.today { border: 1px solid var(--accent); }
+
+.quick-jumps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.quick-jumps button { background: var(--card2); border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; }
+.quick-jumps button:hover { color: var(--text); border-color: var(--accent); }
+
+.stats { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+.stat { background: var(--card); padding: 14px 18px; border-radius: 10px; min-width: 130px; flex: 1; }
+.stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.stat-val { font-size: 24px; font-weight: 800; margin-top: 4px; }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+.btn { padding: 6px 14px; border-radius: 7px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 12px; font-weight: 600; cursor: pointer; }
+.btn:hover { background: var(--card2); }
+.btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
+td { padding: 10px; border-bottom: 1px solid #1e293b; font-size: 13px; vertical-align: middle; }
+tr:hover td { background: rgba(59,130,246,0.04); }
+
+.team { font-weight: 700; font-size: 14px; }
+.pitcher { color: var(--muted); font-size: 12px; }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 18px; }
+.tab { padding: 8px 20px; border-radius: 8px 8px 0 0; background: var(--card); color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; }
+.tab.active { background: var(--card2); color: var(--text); border-color: var(--border); }
+
+.card { background: var(--card); border-radius: 12px; overflow: hidden; }
+.odds { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; font-weight: 600; }
