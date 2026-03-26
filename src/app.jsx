@@ -454,7 +454,7 @@ export default function App(){
       </>}
 
       <div style={{marginTop:20,padding:16,background:"var(--card)",borderRadius:10,fontSize:12,color:"var(--muted)",lineHeight:1.6}}>
-        <strong style={{color:"var(--text)"}}>Model inputs:</strong> F5 total (primary anchor), pitcher projections/stats, top-5 lineup OBP/SLG, park factors, weather. When F5 is entered, pitcher/lineup/park weights are reduced to avoid double-counting. P(NRFI) = P(0R top 1st) &times; P(0R bot 1st). Model output only &mdash; not financial advice.
+        <strong style={{color:"var(--text)"}}>Model inputs:</strong> F5 total (primary anchor), pitcher projections/stats, top-5 lineup OBP/SLG, park factors, weather. When F5 is entered, pitcher/lineup/park weights are reduced to avoid double-counting. P(NRFI) = P(0R top 1st) &times; P(0R bot 1st). Model output only &mdash; Hollenberg.
       </div>
     </div>
   );
