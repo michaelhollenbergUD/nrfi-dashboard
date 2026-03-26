@@ -192,21 +192,52 @@ async function fetchLineup(gameId, teamType) {
     if (!teamData) return null;
     const battingOrder = teamData.battingOrder || [];
     if (!battingOrder.length) return null;
-    const topBatters = battingOrder.slice(0, 4);
-    const players = teamData.players || {};
 
-    return topBatters.map(pid => {
+    // Get top 5 batters (they can bat in the 1st inning)
+    const topBatters = battingOrder.slice(0, 5);
+
+    // Determine season from game date
+    const gameYear = parseInt(data?.gameData?.datetime?.officialDate?.slice(0, 4)) || new Date().getFullYear();
+
+    const batterStats = await Promise.all(topBatters.map(async (pid) => {
+      const players = teamData.players || {};
       const p = players[`ID${pid}`];
-      const stats = p?.seasonStats?.batting;
-      return {
-        name: p?.person?.fullName || "Unknown",
-        hand: p?.person?.batSide?.code || "R",
-        obp: parseFloat(stats?.obp) || LG.obp,
-        slg: parseFloat(stats?.slg) || LG.slg,
-        kPct: LG.kPct,
-        bbPct: LG.bbPct,
-      };
-    });
+      const name = p?.person?.fullName || "Unknown";
+      const hand = p?.person?.batSide?.code || "R";
+
+      try {
+        // Try current season first
+        let r = await fetch(`${MLB_PEOPLE_URL}/${pid}/stats?stats=season&season=${gameYear}&group=hitting&sportId=1`);
+        let d = await r.json();
+        let s = d?.stats?.[0]?.splits?.[0]?.stat;
+
+        // If no stats this year, fall back to prior year
+        if (!s || !parseFloat(s.plateAppearances)) {
+          r = await fetch(`${MLB_PEOPLE_URL}/${pid}/stats?stats=season&season=${gameYear - 1}&group=hitting&sportId=1`);
+          d = await r.json();
+          s = d?.stats?.[0]?.splits?.[0]?.stat;
+        }
+
+        if (!s) return { name, hand, obp: LG.obp, slg: LG.slg, kPct: LG.kPct, bbPct: LG.bbPct, avg: 0.250, pa: 0 };
+
+        const pa = parseFloat(s.plateAppearances) || 0;
+        const ab = parseFloat(s.atBats) || 1;
+
+        return {
+          name, hand,
+          obp: parseFloat(s.obp) || LG.obp,
+          slg: parseFloat(s.slg) || LG.slg,
+          avg: parseFloat(s.avg) || 0.250,
+          kPct: ab > 0 ? (parseFloat(s.strikeOuts) / ab) : LG.kPct,
+          bbPct: pa > 0 ? (parseFloat(s.baseOnBalls) / pa) : LG.bbPct,
+          pa,
+        };
+      } catch {
+        return { name, hand, obp: LG.obp, slg: LG.slg, kPct: LG.kPct, bbPct: LG.bbPct, avg: 0.250, pa: 0 };
+      }
+    }));
+
+    return batterStats;
   } catch { return null; }
 }
 
