@@ -160,9 +160,10 @@ function lookupProjection(projections, pitcherName) {
 // LIVE PITCHER STATS FALLBACK (when no FanGraphs projection)
 // =========================================================================
 
-async function fetchLivePitcherStats(playerId) {
+async function fetchLivePitcherStats(playerId, season) {
   try {
-    const r = await fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&group=pitching&sportId=1`);
+    const seasonParam = season ? `&season=${season}` : "";
+    const r = await fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&group=pitching&sportId=1${seasonParam}`);
     const d = await r.json();
     const s = d?.stats?.[0]?.splits?.[0]?.stat;
     if (!s) return null;
@@ -235,7 +236,7 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
 
   // --- PITCHER (FanGraphs projections or live MLB stats) ---
   if (proj) {
-    const hasProjections = proj.fip != null; // FanGraphs has FIP, live stats don't
+    const hasProjections = proj.source !== "mlb-live" && proj.fip != null;
     const ip = proj.ip || 0;
 
     if (hasProjections) {
@@ -247,15 +248,15 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
       const bb9 = proj.bb9 ?? LG.bb9;
       const hr9 = proj.hr9 ?? LG.hr9;
 
-      lo += (LG.fip - fip) * 0.10;
-      lo += (LG.era - era) * 0.04;
-      lo += (LG.whip - whip) * 0.30;
-      lo += (k9 - LG.k9) * 0.02;
-      lo += (LG.bb9 - bb9) * 0.03;
-      lo += (LG.hr9 - hr9) * 0.05;
+      lo += (LG.fip - fip) * 0.15;
+      lo += (LG.era - era) * 0.06;
+      lo += (LG.whip - whip) * 0.45;
+      lo += (k9 - LG.k9) * 0.03;
+      lo += (LG.bb9 - bb9) * 0.05;
+      lo += (LG.hr9 - hr9) * 0.08;
 
-      if (proj.xfip) lo += (LG.fip - proj.xfip) * 0.02;
-      if (proj.siera) lo += (LG.era - proj.siera) * 0.02;
+      if (proj.xfip) lo += (LG.fip - proj.xfip) * 0.03;
+      if (proj.siera) lo += (LG.era - proj.siera) * 0.03;
     } else {
       // Live MLB stats: regress toward league average based on IP
       const weight = Math.min(ip / 80, 1);
@@ -271,11 +272,11 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
       const wBb9 = bb9 * weight + LG.bb9 * (1 - weight);
       const wHr9 = hr9 * weight + LG.hr9 * (1 - weight);
 
-      lo += (LG.era - wEra) * 0.07;
-      lo += (LG.whip - wWhip) * 0.35;
-      lo += (wK9 - LG.k9) * 0.02;
-      lo += (LG.bb9 - wBb9) * 0.03;
-      lo += (LG.hr9 - wHr9) * 0.05;
+      lo += (LG.era - wEra) * 0.10;
+      lo += (LG.whip - wWhip) * 0.50;
+      lo += (wK9 - LG.k9) * 0.03;
+      lo += (LG.bb9 - wBb9) * 0.05;
+      lo += (LG.hr9 - wHr9) * 0.08;
     }
   }
 
@@ -286,26 +287,26 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
     const avgKPct = lineup.reduce((s, b) => s + (b.kPct || LG.kPct), 0) / lineup.length;
     const avgBbPct = lineup.reduce((s, b) => s + (b.bbPct || LG.bbPct), 0) / lineup.length;
 
-    lo -= (avgObp - LG.obp) * 1.8;
-    lo -= (avgSlg - LG.slg) * 0.7;
-    lo += (avgKPct - LG.kPct) * 0.4;
-    lo -= (avgBbPct - LG.bbPct) * 0.5;
+    lo -= (avgObp - LG.obp) * 2.5;
+    lo -= (avgSlg - LG.slg) * 1.0;
+    lo += (avgKPct - LG.kPct) * 0.6;
+    lo -= (avgBbPct - LG.bbPct) * 0.7;
   }
 
   // --- PARK FACTOR ---
-  lo -= ((parkFactor || 1.0) - 1.0) * 0.8;
+  lo -= ((parkFactor || 1.0) - 1.0) * 1.1;
 
   // --- WEATHER ---
   if (weather) {
     if (weather.temp != null) {
-      lo -= ((weather.temp - 72) / 100) * 0.15;
+      lo -= ((weather.temp - 72) / 100) * 0.2;
     }
     const wind = parseWind(weather.wind);
     const sensitivity = WIND_PARK_SENSITIVITY[homeAbbr] || 0.5;
     if (wind.direction === "out" && wind.speed > 5) {
-      lo -= (wind.speed / 100) * sensitivity * 0.8;
+      lo -= (wind.speed / 100) * sensitivity * 1.1;
     } else if (wind.direction === "in" && wind.speed > 5) {
-      lo += (wind.speed / 100) * sensitivity * 0.5;
+      lo += (wind.speed / 100) * sensitivity * 0.7;
     }
   }
 
@@ -543,12 +544,13 @@ export default function App() {
         let homeSource = homeProj ? "fangraphs" : "none";
 
         // If no projection, pull live stats from MLB API
+        const selectedYear = parseInt(dateStr.slice(0, 4));
         if (!awayProj && awayPitcherInfo?.id) {
-          const live = await fetchLivePitcherStats(awayPitcherInfo.id);
+          const live = await fetchLivePitcherStats(awayPitcherInfo.id, selectedYear);
           if (live && live.ip > 0) { awayProj = live; awaySource = "mlb-live"; }
         }
         if (!homeProj && homePitcherInfo?.id) {
-          const live = await fetchLivePitcherStats(homePitcherInfo.id);
+          const live = await fetchLivePitcherStats(homePitcherInfo.id, selectedYear);
           if (live && live.ip > 0) { homeProj = live; homeSource = "mlb-live"; }
         }
 
