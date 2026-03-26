@@ -245,9 +245,57 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
   }
 
   // --- PITCHER (FanGraphs projections or live MLB stats) ---
+  // When F5 total is provided, reduce pitcher weight since F5 already captures pitcher quality
+  const pitcherScale = (f5Total != null && f5Total > 0) ? 0.35 : 1.0;
+
   if (proj) {
     const hasProjections = proj.source !== "mlb-live" && proj.fip != null;
     const ip = proj.ip || 0;
+
+    if (hasProjections) {
+      // FanGraphs projections: FIP is primary
+      const fip = proj.fip ?? LG.fip;
+      const era = proj.era ?? LG.era;
+      const whip = proj.whip ?? LG.whip;
+      const k9 = proj.k9 ?? LG.k9;
+      const bb9 = proj.bb9 ?? LG.bb9;
+      const hr9 = proj.hr9 ?? LG.hr9;
+
+      lo += (LG.fip - fip) * 0.15 * pitcherScale;
+      lo += (LG.era - era) * 0.06 * pitcherScale;
+      lo += (LG.whip - whip) * 0.45 * pitcherScale;
+      lo += (k9 - LG.k9) * 0.03 * pitcherScale;
+      lo += (LG.bb9 - bb9) * 0.05 * pitcherScale;
+      lo += (LG.hr9 - hr9) * 0.08 * pitcherScale;
+
+      if (proj.xfip) lo += (LG.fip - proj.xfip) * 0.03 * pitcherScale;
+      if (proj.siera) lo += (LG.era - proj.siera) * 0.03 * pitcherScale;
+    } else {
+      // Live MLB stats: regress toward league average based on IP
+      const weight = Math.min(ip / 80, 1);
+      const era = proj.era ?? LG.era;
+      const whip = proj.whip ?? LG.whip;
+      const k9 = proj.k9 ?? LG.k9;
+      const bb9 = proj.bb9 ?? LG.bb9;
+      const hr9 = proj.hr9 ?? LG.hr9;
+
+      const wEra = era * weight + LG.era * (1 - weight);
+      const wWhip = whip * weight + LG.whip * (1 - weight);
+      const wK9 = k9 * weight + LG.k9 * (1 - weight);
+      const wBb9 = bb9 * weight + LG.bb9 * (1 - weight);
+      const wHr9 = hr9 * weight + LG.hr9 * (1 - weight);
+
+      lo += (LG.era - wEra) * 0.10 * pitcherScale;
+      lo += (LG.whip - wWhip) * 0.50 * pitcherScale;
+      lo += (wK9 - LG.k9) * 0.03 * pitcherScale;
+      lo += (LG.bb9 - wBb9) * 0.05 * pitcherScale;
+      lo += (LG.hr9 - wHr9) * 0.08 * pitcherScale;
+    }
+  }
+
+  // --- LINEUP (top 4 batters) ---
+  // Also scale down when F5 is present since it captures lineup quality too
+  const lineupScale = (f5Total != null && f5Total > 0) ? 0.4 : 1.0;
 
     if (hasProjections) {
       // FanGraphs projections: FIP is primary
@@ -297,14 +345,15 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
     const avgKPct = lineup.reduce((s, b) => s + (b.kPct || LG.kPct), 0) / lineup.length;
     const avgBbPct = lineup.reduce((s, b) => s + (b.bbPct || LG.bbPct), 0) / lineup.length;
 
-    lo -= (avgObp - LG.obp) * 2.5;
-    lo -= (avgSlg - LG.slg) * 1.0;
-    lo += (avgKPct - LG.kPct) * 0.6;
-    lo -= (avgBbPct - LG.bbPct) * 0.7;
+    lo -= (avgObp - LG.obp) * 2.5 * lineupScale;
+    lo -= (avgSlg - LG.slg) * 1.0 * lineupScale;
+    lo += (avgKPct - LG.kPct) * 0.6 * lineupScale;
+    lo -= (avgBbPct - LG.bbPct) * 0.7 * lineupScale;
   }
 
   // --- PARK FACTOR ---
-  lo -= ((parkFactor || 1.0) - 1.0) * 1.1;
+  const parkScale = (f5Total != null && f5Total > 0) ? 0.3 : 1.0;
+  lo -= ((parkFactor || 1.0) - 1.0) * 1.1 * parkScale;
 
   // --- WEATHER ---
   if (weather) {
