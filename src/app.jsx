@@ -41,40 +41,122 @@ const LG = {
 // PITCHER STATS (season + first-inning splits)
 // =========================================================================
 
-async function fetchPitcherStats(playerId) {
+function parseStatLine(s) {
+  if (!s) return null;
+  return {
+    era: parseFloat(s.era) || LG.era,
+    whip: parseFloat(s.whip) || LG.whip,
+    k9: parseFloat(s.strikeoutsPer9Inn) || LG.k9,
+    bb9: parseFloat(s.walksPer9Inn) || LG.bb9,
+    hr9: parseFloat(s.homeRunsPer9) || LG.hr9,
+    ip: parseFloat(s.inningsPitched) || 0,
+  };
+}
+
+function parseFiLine(fi) {
+  if (!fi) return null;
+  return {
+    era: parseFloat(fi.era) || null,
+    whip: parseFloat(fi.whip) || null,
+    k9: parseFloat(fi.strikeoutsPer9Inn) || null,
+    bb9: parseFloat(fi.walksPer9Inn) || null,
+    hr9: parseFloat(fi.homeRunsPer9) || null,
+    ip: parseFloat(fi.inningsPitched) || 0,
+    avg: parseFloat(fi.avg) || null,
+    obp: parseFloat(fi.obp) || null,
+  };
+}
+
+function blendStats(current, prior) {
+  // Early season: lean on prior year. As current IP grows, shift weight.
+  // At 0 IP current → 100% prior. At 50 IP → 50/50. At 100+ IP → ~85% current.
+  if (!current && !prior) return null;
+  if (!current) return prior;
+  if (!prior) return current;
+
+  const curIP = current.ip || 0;
+  const curWeight = Math.min(curIP / 100, 0.85);
+  const priorWeight = 1 - curWeight;
+
+  const blend = (curVal, priorVal, fallback) => {
+    const c = curVal ?? fallback;
+    const p = priorVal ?? fallback;
+    return c * curWeight + p * priorWeight;
+  };
+
+  return {
+    era: blend(current.era, prior.era, LG.era),
+    whip: blend(current.whip, prior.whip, LG.whip),
+    k9: blend(current.k9, prior.k9, LG.k9),
+    bb9: blend(current.bb9, prior.bb9, LG.bb9),
+    hr9: blend(current.hr9, prior.hr9, LG.hr9),
+    ip: curIP + (prior.ip || 0), // total for sample size display
+    curIP,
+    priorIP: prior.ip || 0,
+    curWeight: Math.round(curWeight * 100),
+  };
+}
+
+function blendFiStats(current, prior) {
+  if (!current && !prior) return null;
+  if (!current) return prior;
+  if (!prior) return current;
+
+  const curIP = current.ip || 0;
+  const curWeight = Math.min(curIP / 25, 0.75); // FI splits need less IP to stabilize
+  const priorWeight = 1 - curWeight;
+
+  const blend = (c, p, fb) => ((c ?? fb) * curWeight + (p ?? fb) * priorWeight);
+
+  return {
+    era: blend(current.era, prior.era, LG.era),
+    whip: blend(current.whip, prior.whip, LG.whip),
+    k9: blend(current.k9, prior.k9, LG.k9),
+    bb9: blend(current.bb9, prior.bb9, LG.bb9),
+    hr9: blend(current.hr9, prior.hr9, LG.hr9),
+    ip: curIP + (prior.ip || 0),
+    avg: blend(current.avg, prior.avg, 0.250),
+    obp: blend(current.obp, prior.obp, LG.obp),
+    curIP,
+    priorIP: prior.ip || 0,
+    curWeight: Math.round(curWeight * 100),
+  };
+}
+
+async function fetchPitcherStats(playerId, selectedYear) {
+  const currentYear = selectedYear || new Date().getFullYear();
+  const priorYear = currentYear - 1;
+
   try {
-    const [seasonRes, splitRes] = await Promise.all([
-      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&group=pitching&sportId=1`),
-      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=statSplits&group=pitching&sportId=1&sitCodes=1i`),
+    const [curSeasonRes, priorSeasonRes, curFiRes, priorFiRes] = await Promise.all([
+      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&season=${currentYear}&group=pitching&sportId=1`),
+      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&season=${priorYear}&group=pitching&sportId=1`),
+      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=statSplits&season=${currentYear}&group=pitching&sportId=1&sitCodes=1i`),
+      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=statSplits&season=${priorYear}&group=pitching&sportId=1&sitCodes=1i`),
     ]);
-    const seasonData = await seasonRes.json();
-    const splitData = await splitRes.json();
 
-    const s = seasonData?.stats?.[0]?.splits?.[0]?.stat;
-    const fi = splitData?.stats?.[0]?.splits?.[0]?.stat;
+    const curSeasonData = await curSeasonRes.json();
+    const priorSeasonData = await priorSeasonRes.json();
+    const curFiData = await curFiRes.json();
+    const priorFiData = await priorFiRes.json();
 
-    const season = s ? {
-      era: parseFloat(s.era) || LG.era,
-      whip: parseFloat(s.whip) || LG.whip,
-      k9: parseFloat(s.strikeoutsPer9Inn) || LG.k9,
-      bb9: parseFloat(s.walksPer9Inn) || LG.bb9,
-      hr9: parseFloat(s.homeRunsPer9) || LG.hr9,
-      ip: parseFloat(s.inningsPitched) || 0,
-    } : null;
+    const curSeason = parseStatLine(curSeasonData?.stats?.[0]?.splits?.[0]?.stat);
+    const priorSeason = parseStatLine(priorSeasonData?.stats?.[0]?.splits?.[0]?.stat);
+    const curFi = parseFiLine(curFiData?.stats?.[0]?.splits?.[0]?.stat);
+    const priorFi = parseFiLine(priorFiData?.stats?.[0]?.splits?.[0]?.stat);
 
-    const firstInning = fi ? {
-      era: parseFloat(fi.era) || null,
-      whip: parseFloat(fi.whip) || null,
-      k9: parseFloat(fi.strikeoutsPer9Inn) || null,
-      bb9: parseFloat(fi.walksPer9Inn) || null,
-      hr9: parseFloat(fi.homeRunsPer9) || null,
-      ip: parseFloat(fi.inningsPitched) || 0,
-      avg: parseFloat(fi.avg) || null,
-      obp: parseFloat(fi.obp) || null,
-    } : null;
+    const season = blendStats(curSeason, priorSeason);
+    const firstInning = blendFiStats(curFi, priorFi);
 
-    return { season, firstInning };
-  } catch { return { season: null, firstInning: null }; }
+    return {
+      season,
+      firstInning,
+      curSeason,
+      priorSeason,
+      curFi,
+      priorFi,
+    };
+  } catch { return { season: null, firstInning: null, curSeason: null, priorSeason: null, curFi: null, priorFi: null }; }
 }
 
 // =========================================================================
@@ -365,6 +447,20 @@ function FiSplitBadge({ fi }) {
       <span style={{ color: eraColor, fontWeight: 700 }}>{fi.era?.toFixed(2)} ERA</span>
       <span style={{ color: "var(--muted)", marginLeft: 6 }}>{fi.whip?.toFixed(2)} WHIP</span>
       <span style={{ color: "var(--muted)", marginLeft: 6 }}>{fi.ip?.toFixed(1)} IP</span>
+      {fi.curWeight != null && <div style={{ fontSize: 10, color: "var(--border)" }}>
+        {fi.curWeight}% this yr / {100 - fi.curWeight}% last yr
+      </div>}
+    </div>
+  );
+}
+
+function SeasonBlendBadge({ pitcher }) {
+  if (!pitcher?.season) return null;
+  const s = pitcher.season;
+  if (s.curWeight == null) return null;
+  return (
+    <div style={{ fontSize: 10, color: "var(--border)", marginTop: 2 }}>
+      Blend: {s.curWeight}% {s.curIP?.toFixed(0)}IP this yr / {100 - s.curWeight}% {s.priorIP?.toFixed(0)}IP last yr
     </div>
   );
 }
@@ -404,11 +500,12 @@ export default function App() {
         const awayPName = awayPitcherInfo ? awayPitcherInfo.fullName : "TBD";
         const homePName = homePitcherInfo ? homePitcherInfo.fullName : "TBD";
 
-        // Fetch pitcher stats with first-inning splits
-        let awayPitcher = { season: null, firstInning: null };
-        let homePitcher = { season: null, firstInning: null };
-        if (awayPitcherInfo?.id) awayPitcher = await fetchPitcherStats(awayPitcherInfo.id);
-        if (homePitcherInfo?.id) homePitcher = await fetchPitcherStats(homePitcherInfo.id);
+        // Fetch pitcher stats with first-inning splits (current + prior year blend)
+        const selectedYear = parseInt(dateStr.slice(0, 4));
+        let awayPitcher = { season: null, firstInning: null, curSeason: null, priorSeason: null };
+        let homePitcher = { season: null, firstInning: null, curSeason: null, priorSeason: null };
+        if (awayPitcherInfo?.id) awayPitcher = await fetchPitcherStats(awayPitcherInfo.id, selectedYear);
+        if (homePitcherInfo?.id) homePitcher = await fetchPitcherStats(homePitcherInfo.id, selectedYear);
 
         // Fetch lineups (only available for started/completed games usually)
         let awayLineup = null, homeLineup = null;
@@ -687,7 +784,11 @@ export default function App() {
             <tbody>{games.flatMap((g,i) => [
               <tr key={`a${i}`} style={{background:"rgba(139,92,246,0.04)"}}>
                 <td rowSpan={2}><div className="team">{g.away} @ {g.home}</div></td>
-                <td><div style={{fontWeight:600}}>{g.awayP}</div><div style={{fontSize:11,color:"var(--muted)"}}>Away</div></td>
+                <td>
+                  <div style={{fontWeight:600}}>{g.awayP}</div>
+                  <div style={{fontSize:11,color:"var(--muted)"}}>Away</div>
+                  <SeasonBlendBadge pitcher={g.awayPitcher} />
+                </td>
                 <td style={{fontWeight:600}}>{g.awayPitcher?.season?.era?.toFixed(2) ?? "\u2014"}</td>
                 <td>{g.awayPitcher?.season?.whip?.toFixed(2) ?? "\u2014"}</td>
                 <td>{g.awayPitcher?.season?.k9?.toFixed(1) ?? "\u2014"}</td>
@@ -697,7 +798,11 @@ export default function App() {
                 <td><FiSplitBadge fi={g.awayPitcher?.firstInning} /></td>
               </tr>,
               <tr key={`h${i}`}>
-                <td><div style={{fontWeight:600}}>{g.homeP}</div><div style={{fontSize:11,color:"var(--muted)"}}>Home</div></td>
+                <td>
+                  <div style={{fontWeight:600}}>{g.homeP}</div>
+                  <div style={{fontSize:11,color:"var(--muted)"}}>Home</div>
+                  <SeasonBlendBadge pitcher={g.homePitcher} />
+                </td>
                 <td style={{fontWeight:600}}>{g.homePitcher?.season?.era?.toFixed(2) ?? "\u2014"}</td>
                 <td>{g.homePitcher?.season?.whip?.toFixed(2) ?? "\u2014"}</td>
                 <td>{g.homePitcher?.season?.k9?.toFixed(1) ?? "\u2014"}</td>
