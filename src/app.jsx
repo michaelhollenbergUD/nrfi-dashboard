@@ -757,7 +757,7 @@ export default function App() {
 
       {/* Tabs */}
       <div className="tabs">
-        {[["slate","Full Slate"],["half","Half-Inning"],["lineups","Lineups"],["projections","Projections"],["weather","Weather"]].map(([k,l]) =>
+        {[["slate","Full Slate"],["half","Half-Inning"],["lineups","Lineups"],["projections","Projections"],["environment","Park & Weather"]].map(([k,l]) =>
           <div key={k} className={`tab ${tab===k?"active":""}`} onClick={() => setTab(k)}>{l}</div>
         )}
       </div>
@@ -772,7 +772,7 @@ export default function App() {
         {tab === "slate" && <>
           <div className="controls">
             <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>Sort:</span>
-            {[["nrfi","NRFI%"],["yrfi","YRFI%"],["time","Time"],["park","Park"]].map(([k,l]) =>
+            {[["nrfi","NRFI%"],["yrfi","YRFI%"],["time","Time"]].map(([k,l]) =>
               <button key={k} className={`btn ${sort===k?"active":""}`} onClick={() => setSort(k)}>{l}</button>
             )}
             <span style={{fontSize:12,color:"var(--muted)",marginLeft:12,marginRight:4}}>Show:</span>
@@ -785,7 +785,7 @@ export default function App() {
               <thead><tr>
                 <th>Game</th><th>Time</th><th>F5 Total</th><th onClick={() => setSort("nrfi")}>P(NRFI)</th>
                 <th onClick={() => setSort("yrfi")}>P(YRFI)</th><th>Fair NRFI</th><th>Fair YRFI</th>
-                <th onClick={() => setSort("park")}>Park</th><th>Data</th><th>Status</th><th>Result</th>
+                <th>Data</th><th>Status</th><th>Result</th>
               </tr></thead>
               <tbody>{sorted.map((g,i) => (
                 <tr key={i}>
@@ -815,7 +815,6 @@ export default function App() {
                   <td><BarCell value={g.pYrfi} color="var(--red)" /></td>
                   <td className="odds">{probToAmerican(g.pNrfi)}</td>
                   <td className="odds">{probToAmerican(g.pYrfi)}</td>
-                  <td><span style={{color:g.parkFactor>1.03?"var(--red)":g.parkFactor<0.95?"var(--green)":"var(--muted)",fontWeight:600,fontSize:13}}>{g.parkFactor.toFixed(2)}</span></td>
                   <td>
                     <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
                       {g.awaySource === "fangraphs" && g.homeSource === "fangraphs" && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(168,85,247,0.15)",color:"#a855f7",fontWeight:600}}>FG</span>}
@@ -927,10 +926,10 @@ export default function App() {
             </table>
         </div>}
 
-        {/* WEATHER */}
-        {tab === "weather" && <div className="card" style={{overflowX:"auto"}}>
+        {/* PARK & WEATHER */}
+        {tab === "environment" && <div className="card" style={{overflowX:"auto"}}>
           <table>
-            <thead><tr><th>Game</th><th>Weather</th><th>Park Factor</th><th>Wind Impact</th><th>P(NRFI)</th><th>Result</th></tr></thead>
+            <thead><tr><th>Game</th><th>Park Factor</th><th>Weather</th><th>Wind Impact</th><th>P(NRFI)</th><th>Result</th></tr></thead>
             <tbody>{[...games].sort((a,b) => b.pNrfi - a.pNrfi).map((g,i) => {
               const wind = parseWind(g.weather?.wind);
               let impact = "Neutral", impactColor = "var(--muted)";
@@ -941,8 +940,8 @@ export default function App() {
               return (
                 <tr key={i}>
                   <td><div className="team">{g.away} @ {g.home}</div><div className="pitcher">{g.awayP} vs {g.homeP}</div></td>
+                  <td><span style={{color:g.parkFactor>1.03?"var(--red)":g.parkFactor<0.95?"var(--green)":"var(--muted)",fontWeight:700,fontSize:14}}>{g.parkFactor.toFixed(2)}</span></td>
                   <td><WeatherBadge weather={g.weather} /></td>
-                  <td><span style={{color:g.parkFactor>1.03?"var(--red)":g.parkFactor<0.95?"var(--green)":"var(--muted)",fontWeight:600}}>{g.parkFactor.toFixed(2)}</span></td>
                   <td><span style={{color:impactColor,fontWeight:600,fontSize:12}}>{impact}</span></td>
                   <td><BarCell value={g.pNrfi} color="var(--accent)" /></td>
                   <td><ActualBadge runs={g.actual1stRuns} /></td>
