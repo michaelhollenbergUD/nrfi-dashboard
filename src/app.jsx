@@ -246,7 +246,7 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
 
   // --- PITCHER (FanGraphs projections or live MLB stats) ---
   // When F5 total is provided, reduce pitcher weight since F5 already captures pitcher quality
-  const pitcherScale = (f5Total != null && f5Total > 0) ? 0.35 : 1.0;
+  const pitcherScale = (f5Total != null && f5Total > 0) ? 0.20 : 1.0;
 
   if (proj) {
     const hasProjections = proj.source !== "mlb-live" && proj.fip != null;
@@ -295,7 +295,7 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
 
   // --- LINEUP (top 4 batters) ---
   // Also scale down when F5 is present since it captures lineup quality too
-  const lineupScale = (f5Total != null && f5Total > 0) ? 0.4 : 1.0;
+  const lineupScale = (f5Total != null && f5Total > 0) ? 0.25 : 1.0;
 
     if (hasProjections) {
       // FanGraphs projections: FIP is primary
@@ -352,7 +352,7 @@ function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbb
   }
 
   // --- PARK FACTOR ---
-  const parkScale = (f5Total != null && f5Total > 0) ? 0.3 : 1.0;
+  const parkScale = (f5Total != null && f5Total > 0) ? 0.15 : 1.0;
   lo -= ((parkFactor || 1.0) - 1.0) * 1.1 * parkScale;
 
   // --- WEATHER ---
