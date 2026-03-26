@@ -230,9 +230,19 @@ function parseWind(windStr) {
 // MODEL — uses FanGraphs projections when available
 // =========================================================================
 
-function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbbr) {
+function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbbr, f5Total) {
   const baseP = 1 - LG.scoringPct;
   let lo = Math.log(baseP / (1 - baseP));
+
+  // --- F5 TOTAL (strongest anchor for market making) ---
+  // Average F5 total is ~4.5 runs. Higher = more run-friendly environment.
+  // This captures pitching matchup, park, weather, lineups as priced by the market.
+  if (f5Total != null && f5Total > 0) {
+    const f5Avg = 4.5;
+    const f5Diff = f5Total - f5Avg;
+    // Each 0.5 run above/below average shifts first-inning scoring expectation
+    lo -= f5Diff * 0.18;
+  }
 
   // --- PITCHER (FanGraphs projections or live MLB stats) ---
   if (proj) {
@@ -515,6 +525,13 @@ export default function App() {
   const [projCount, setProjCount] = useState(0);
   const [unmatchedPitchers, setUnmatchedPitchers] = useState([]);
 
+  // F5 totals (keyed by "away@home")
+  const [f5Totals, setF5Totals] = useState({});
+
+  const setF5 = (key, val) => {
+    setF5Totals(prev => ({ ...prev, [key]: val }));
+  };
+
   const handleProjectionUpload = (projs, count) => {
     setProjections(projs);
     setProjCount(Math.floor(count / 2)); // each pitcher stored under 2 keys (full name + last name)
@@ -570,11 +587,13 @@ export default function App() {
         }
 
         const parkFactor = PARK_FACTORS[homeAbbr] || 1.0;
+        const gameKey = `${awayAbbr}@${homeAbbr}`;
+        const f5 = f5Totals[gameKey] || null;
 
         // Top of 1st: away batters vs home pitcher
-        const topP = estimatePZero(homeProj, parkFactor, false, awayLineup, weather, homeAbbr);
+        const topP = estimatePZero(homeProj, parkFactor, false, awayLineup, weather, homeAbbr, f5);
         // Bot of 1st: home batters vs away pitcher
-        const botP = estimatePZero(awayProj, parkFactor, true, homeLineup, weather, homeAbbr);
+        const botP = estimatePZero(awayProj, parkFactor, true, homeLineup, weather, homeAbbr, f5);
         const pNrfi = topP * botP;
 
         const status = g.status?.detailedState || "Scheduled";
@@ -593,7 +612,7 @@ export default function App() {
           away: awayAbbr, home: homeAbbr, awayP: awayPName, homeP: homePName,
           awayProj, homeProj, awaySource, homeSource, awayLineup, homeLineup, weather,
           pNrfi, pYrfi: 1 - pNrfi, topP, botP, parkFactor,
-          status, gameTime, actual1stRuns,
+          status, gameTime, actual1stRuns, gameKey,
           hasPitchers: awayPName !== "TBD" && homePName !== "TBD",
           hasLineups: (awayLineup?.length > 0) && (homeLineup?.length > 0),
           hasProj: awayProj != null && homeProj != null,
@@ -611,7 +630,7 @@ export default function App() {
       setGames(processed);
     } catch (e) { setError(e.message); }
     setLoading(false);
-  }, [projections, projCount]);
+  }, [projections, projCount, f5Totals]);
 
   useEffect(() => { loadGames(selectedDate); }, [selectedDate, loadGames]);
 
@@ -764,7 +783,7 @@ export default function App() {
           <div className="card" style={{overflowX:"auto"}}>
             <table>
               <thead><tr>
-                <th>Game</th><th>Time</th><th onClick={() => setSort("nrfi")}>P(NRFI)</th>
+                <th>Game</th><th>Time</th><th>F5 Total</th><th onClick={() => setSort("nrfi")}>P(NRFI)</th>
                 <th onClick={() => setSort("yrfi")}>P(YRFI)</th><th>Fair NRFI</th><th>Fair YRFI</th>
                 <th onClick={() => setSort("park")}>Park</th><th>Data</th><th>Status</th><th>Result</th>
               </tr></thead>
@@ -775,6 +794,23 @@ export default function App() {
                     <div className="pitcher">{g.awayP} vs {g.homeP}</div>
                   </td>
                   <td style={{color:"var(--muted)",fontSize:12}}>{g.gameTime} ET</td>
+                  <td>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      max="15"
+                      placeholder="F5"
+                      value={f5Totals[g.gameKey] ?? ""}
+                      onChange={(e) => setF5(g.gameKey, e.target.value ? parseFloat(e.target.value) : null)}
+                      style={{
+                        width: 58, padding: "4px 6px", fontSize: 13, fontWeight: 600,
+                        background: "var(--card2)", border: "1px solid var(--border)", borderRadius: 6,
+                        color: f5Totals[g.gameKey] ? "var(--text)" : "var(--muted)", textAlign: "center",
+                        outline: "none",
+                      }}
+                    />
+                  </td>
                   <td><BarCell value={g.pNrfi} color="var(--accent)" /></td>
                   <td><BarCell value={g.pYrfi} color="var(--red)" /></td>
                   <td className="odds">{probToAmerican(g.pNrfi)}</td>
@@ -919,9 +955,9 @@ export default function App() {
       </>}
 
       <div style={{marginTop:20,padding:16,background:"var(--card)",borderRadius:10,fontSize:12,color:"var(--muted)",lineHeight:1.6}}>
-        <strong style={{color:"var(--text)"}}>Model inputs:</strong> FanGraphs pitcher projections when available (FIP primary, ERA/WHIP/K&#8725;9/BB&#8725;9/HR&#8725;9 secondary),
-        falling back to live MLB season stats with sample-size regression when no projection is loaded.
-        Also uses top-of-order lineup OBP/SLG, park run factors, temperature, wind speed &amp; direction.
+        <strong style={{color:"var(--text)"}}>Model inputs:</strong> First 5 innings total (manual input, anchors to game environment),
+        FanGraphs pitcher projections when available (FIP primary), falling back to live MLB season stats.
+        Also uses top-of-order lineup OBP/SLG, park run factors, temperature, wind.
         P(NRFI) = P(0R top 1st) &times; P(0R bot 1st).
         Data badges: <span style={{color:"#a855f7"}}>FG</span> = FanGraphs projection,
         <span style={{color:"var(--accent)",marginLeft:2}}>LIVE</span> = MLB season stats,
