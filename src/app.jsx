@@ -543,14 +543,16 @@ export default function App() {
         let awaySource = awayProj ? "fangraphs" : "none";
         let homeSource = homeProj ? "fangraphs" : "none";
 
-        // If no projection, pull live stats from MLB API
+        // If no projection, pull live stats from MLB API (try current year, then prior year)
         const selectedYear = parseInt(dateStr.slice(0, 4));
         if (!awayProj && awayPitcherInfo?.id) {
-          const live = await fetchLivePitcherStats(awayPitcherInfo.id, selectedYear);
+          let live = await fetchLivePitcherStats(awayPitcherInfo.id, selectedYear);
+          if (!live || live.ip === 0) live = await fetchLivePitcherStats(awayPitcherInfo.id, selectedYear - 1);
           if (live && live.ip > 0) { awayProj = live; awaySource = "mlb-live"; }
         }
         if (!homeProj && homePitcherInfo?.id) {
-          const live = await fetchLivePitcherStats(homePitcherInfo.id, selectedYear);
+          let live = await fetchLivePitcherStats(homePitcherInfo.id, selectedYear);
+          if (!live || live.ip === 0) live = await fetchLivePitcherStats(homePitcherInfo.id, selectedYear - 1);
           if (live && live.ip > 0) { homeProj = live; homeSource = "mlb-live"; }
         }
 
