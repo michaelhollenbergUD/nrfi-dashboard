@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 
 const MLB_SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule";
 const MLB_PEOPLE_URL = "https://statsapi.mlb.com/api/v1/people";
@@ -25,207 +25,193 @@ const PARK_FACTORS = {
   NYM: 0.95, LAD: 0.94, SEA: 0.93, TB: 0.93, MIA: 0.92, OAK: 0.92,
 };
 
-// Wind direction effect by park (degrees where wind blowing OUT helps HR)
-// Simplified: parks with open outfield in certain directions
 const WIND_PARK_SENSITIVITY = {
   CHC: 1.5, BOS: 1.2, CIN: 1.1, SF: 1.3, PIT: 1.0, CLE: 1.0,
-  NYM: 0.9, NYY: 0.9, PHI: 0.8, COL: 0.7, // Coors already high base
+  NYM: 0.9, NYY: 0.9, PHI: 0.8, COL: 0.7,
 };
 
 const LG = {
   era: 4.20, whip: 1.27, k9: 8.0, bb9: 3.2, hr9: 1.20, scoringPct: 0.258,
-  obp: 0.317, slg: 0.420, woba: 0.315, kPct: 0.224, bbPct: 0.083,
+  fip: 4.15, obp: 0.317, slg: 0.420, woba: 0.315, kPct: 0.224, bbPct: 0.083,
 };
 
 // =========================================================================
-// PITCHER STATS (season + first-inning splits)
+// FANGRAPHS CSV PARSER
 // =========================================================================
 
-function parseStatLine(s) {
-  if (!s) return null;
-  return {
-    era: parseFloat(s.era) || LG.era,
-    whip: parseFloat(s.whip) || LG.whip,
-    k9: parseFloat(s.strikeoutsPer9Inn) || LG.k9,
-    bb9: parseFloat(s.walksPer9Inn) || LG.bb9,
-    hr9: parseFloat(s.homeRunsPer9) || LG.hr9,
-    ip: parseFloat(s.inningsPitched) || 0,
-  };
-}
+function parseFangraphsCSV(csvText) {
+  const lines = csvText.trim().split("\n");
+  if (lines.length < 2) return {};
 
-function parseFiLine(fi) {
-  if (!fi) return null;
-  return {
-    era: parseFloat(fi.era) || null,
-    whip: parseFloat(fi.whip) || null,
-    k9: parseFloat(fi.strikeoutsPer9Inn) || null,
-    bb9: parseFloat(fi.walksPer9Inn) || null,
-    hr9: parseFloat(fi.homeRunsPer9) || null,
-    ip: parseFloat(fi.inningsPitched) || 0,
-    avg: parseFloat(fi.avg) || null,
-    obp: parseFloat(fi.obp) || null,
-  };
-}
+  // Parse header — handle quoted headers
+  const rawHeader = lines[0];
+  const headers = parseCSVLine(rawHeader).map(h => h.trim().toLowerCase());
 
-function blendStats(current, prior) {
-  // Early season: lean on prior year. As current IP grows, shift weight.
-  // At 0 IP current → 100% prior. At 50 IP → 50/50. At 100+ IP → ~85% current.
-  if (!current && !prior) return null;
-  if (!current) return prior;
-  if (!prior) return current;
-
-  const curIP = current.ip || 0;
-  const curWeight = Math.min(curIP / 100, 0.85);
-  const priorWeight = 1 - curWeight;
-
-  const blend = (curVal, priorVal, fallback) => {
-    const c = curVal ?? fallback;
-    const p = priorVal ?? fallback;
-    return c * curWeight + p * priorWeight;
+  // Find column indices — FanGraphs uses various column names
+  const findCol = (...names) => {
+    for (const n of names) {
+      const idx = headers.indexOf(n.toLowerCase());
+      if (idx >= 0) return idx;
+    }
+    return -1;
   };
 
-  return {
-    era: blend(current.era, prior.era, LG.era),
-    whip: blend(current.whip, prior.whip, LG.whip),
-    k9: blend(current.k9, prior.k9, LG.k9),
-    bb9: blend(current.bb9, prior.bb9, LG.bb9),
-    hr9: blend(current.hr9, prior.hr9, LG.hr9),
-    ip: curIP + (prior.ip || 0), // total for sample size display
-    curIP,
-    priorIP: prior.ip || 0,
-    curWeight: Math.round(curWeight * 100),
-  };
-}
+  const nameIdx = findCol("name", "playername", "player");
+  const eraIdx = findCol("era");
+  const fipIdx = findCol("fip");
+  const whipIdx = findCol("whip");
+  const k9Idx = findCol("k/9", "k9", "so9");
+  const bb9Idx = findCol("bb/9", "bb9");
+  const hr9Idx = findCol("hr/9", "hr9");
+  const ipIdx = findCol("ip", "innings");
+  const kPctIdx = findCol("k%", "kpct", "k_pct");
+  const bbPctIdx = findCol("bb%", "bbpct", "bb_pct");
+  const sieraIdx = findCol("siera");
+  const xfipIdx = findCol("xfip");
+  const warIdx = findCol("war", "fwar");
 
-function blendFiStats(current, prior) {
-  if (!current && !prior) return null;
-  if (!current) return prior;
-  if (!prior) return current;
+  if (nameIdx < 0) return {};
 
-  const curIP = current.ip || 0;
-  const curWeight = Math.min(curIP / 25, 0.75); // FI splits need less IP to stabilize
-  const priorWeight = 1 - curWeight;
+  const projections = {};
 
-  const blend = (c, p, fb) => ((c ?? fb) * curWeight + (p ?? fb) * priorWeight);
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    if (cols.length <= nameIdx) continue;
 
-  return {
-    era: blend(current.era, prior.era, LG.era),
-    whip: blend(current.whip, prior.whip, LG.whip),
-    k9: blend(current.k9, prior.k9, LG.k9),
-    bb9: blend(current.bb9, prior.bb9, LG.bb9),
-    hr9: blend(current.hr9, prior.hr9, LG.hr9),
-    ip: curIP + (prior.ip || 0),
-    avg: blend(current.avg, prior.avg, 0.250),
-    obp: blend(current.obp, prior.obp, LG.obp),
-    curIP,
-    priorIP: prior.ip || 0,
-    curWeight: Math.round(curWeight * 100),
-  };
-}
+    const rawName = cols[nameIdx]?.trim();
+    if (!rawName) continue;
 
-async function fetchPitcherStats(playerId, selectedYear) {
-  const currentYear = selectedYear || new Date().getFullYear();
-  const priorYear = currentYear - 1;
+    // Create lookup keys: full name, last name, normalized
+    const name = rawName.replace(/['"]/g, "").trim();
+    const normalized = normalizeName(name);
+    const lastName = name.split(" ").pop().toLowerCase();
 
-  try {
-    const [curSeasonRes, priorSeasonRes, curFiRes, priorFiRes] = await Promise.all([
-      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&season=${currentYear}&group=pitching&sportId=1`),
-      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&season=${priorYear}&group=pitching&sportId=1`),
-      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=statSplits&season=${currentYear}&group=pitching&sportId=1&sitCodes=1i`),
-      fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=statSplits&season=${priorYear}&group=pitching&sportId=1&sitCodes=1i`),
-    ]);
-
-    const curSeasonData = await curSeasonRes.json();
-    const priorSeasonData = await priorSeasonRes.json();
-    const curFiData = await curFiRes.json();
-    const priorFiData = await priorFiRes.json();
-
-    const curSeason = parseStatLine(curSeasonData?.stats?.[0]?.splits?.[0]?.stat);
-    const priorSeason = parseStatLine(priorSeasonData?.stats?.[0]?.splits?.[0]?.stat);
-    const curFi = parseFiLine(curFiData?.stats?.[0]?.splits?.[0]?.stat);
-    const priorFi = parseFiLine(priorFiData?.stats?.[0]?.splits?.[0]?.stat);
-
-    const season = blendStats(curSeason, priorSeason);
-    const firstInning = blendFiStats(curFi, priorFi);
-
-    return {
-      season,
-      firstInning,
-      curSeason,
-      priorSeason,
-      curFi,
-      priorFi,
+    const getNum = (idx) => {
+      if (idx < 0 || idx >= cols.length) return null;
+      const val = cols[idx]?.trim().replace("%", "");
+      const n = parseFloat(val);
+      return isNaN(n) ? null : n;
     };
-  } catch { return { season: null, firstInning: null, curSeason: null, priorSeason: null, curFi: null, priorFi: null }; }
+
+    const proj = {
+      name,
+      era: getNum(eraIdx),
+      fip: getNum(fipIdx),
+      whip: getNum(whipIdx),
+      k9: getNum(k9Idx),
+      bb9: getNum(bb9Idx),
+      hr9: getNum(hr9Idx),
+      ip: getNum(ipIdx),
+      kPct: getNum(kPctIdx),
+      bbPct: getNum(bbPctIdx),
+      siera: getNum(sieraIdx),
+      xfip: getNum(xfipIdx),
+      war: getNum(warIdx),
+    };
+
+    // Convert K% and BB% from whole numbers to decimals if needed
+    if (proj.kPct && proj.kPct > 1) proj.kPct = proj.kPct / 100;
+    if (proj.bbPct && proj.bbPct > 1) proj.bbPct = proj.bbPct / 100;
+
+    projections[normalized] = proj;
+    projections[lastName] = proj; // fallback by last name
+  }
+
+  return projections;
+}
+
+function parseCSVLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQuotes = !inQuotes; }
+    else if (ch === "," && !inQuotes) { result.push(current); current = ""; }
+    else { current += ch; }
+  }
+  result.push(current);
+  return result;
+}
+
+function normalizeName(name) {
+  return name.toLowerCase().replace(/[^a-z\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function lookupProjection(projections, pitcherName) {
+  if (!projections || !pitcherName || pitcherName === "TBD") return null;
+
+  const normalized = normalizeName(pitcherName);
+  if (projections[normalized]) return projections[normalized];
+
+  // Try last name only
+  const lastName = pitcherName.split(" ").pop().toLowerCase();
+  if (projections[lastName]) return projections[lastName];
+
+  // Fuzzy: check if any key contains the last name
+  for (const [key, val] of Object.entries(projections)) {
+    if (key.includes(lastName)) return val;
+  }
+
+  return null;
 }
 
 // =========================================================================
-// LINEUP DATA (top of the order batters)
+// LIVE PITCHER STATS FALLBACK (when no FanGraphs projection)
+// =========================================================================
+
+async function fetchLivePitcherStats(playerId) {
+  try {
+    const r = await fetch(`${MLB_PEOPLE_URL}/${playerId}/stats?stats=season&group=pitching&sportId=1`);
+    const d = await r.json();
+    const s = d?.stats?.[0]?.splits?.[0]?.stat;
+    if (!s) return null;
+    return {
+      era: parseFloat(s.era) || LG.era,
+      fip: null,
+      whip: parseFloat(s.whip) || LG.whip,
+      k9: parseFloat(s.strikeoutsPer9Inn) || LG.k9,
+      bb9: parseFloat(s.walksPer9Inn) || LG.bb9,
+      hr9: parseFloat(s.homeRunsPer9) || LG.hr9,
+      ip: parseFloat(s.inningsPitched) || 0,
+      source: "mlb-live",
+    };
+  } catch { return null; }
+}
+
+// =========================================================================
+// LINEUP DATA
 // =========================================================================
 
 async function fetchLineup(gameId, teamType) {
   try {
     const res = await fetch(`${MLB_GAME_URL}/${gameId}/feed/live`);
     const data = await res.json();
-    const boxscore = data?.liveData?.boxscore;
-    if (!boxscore) return null;
-
-    const teamKey = teamType === "away" ? "away" : "home";
-    const teamData = boxscore.teams?.[teamKey];
+    const teamData = data?.liveData?.boxscore?.teams?.[teamType];
     if (!teamData) return null;
-
     const battingOrder = teamData.battingOrder || [];
     if (!battingOrder.length) return null;
-
-    // Get top 4 batters (they bat in the 1st inning)
     const topBatters = battingOrder.slice(0, 4);
     const players = teamData.players || {};
 
-    const batterStats = await Promise.all(topBatters.map(async (pid) => {
+    return topBatters.map(pid => {
       const p = players[`ID${pid}`];
-      const name = p?.person?.fullName || "Unknown";
-      const hand = p?.person?.batSide?.code || "R";
-
-      try {
-        const r = await fetch(`${MLB_PEOPLE_URL}/${pid}/stats?stats=season&group=hitting&sportId=1`);
-        const d = await r.json();
-        const s = d?.stats?.[0]?.splits?.[0]?.stat;
-        if (!s) return { name, hand, obp: LG.obp, slg: LG.slg, woba: LG.woba, kPct: LG.kPct, bbPct: LG.bbPct, ops: LG.obp + LG.slg };
-        return {
-          name, hand,
-          obp: parseFloat(s.obp) || LG.obp,
-          slg: parseFloat(s.slg) || LG.slg,
-          woba: parseFloat(s.ops) ? (parseFloat(s.obp) * 0.7 + parseFloat(s.slg) * 0.3) : LG.woba, // approximate wOBA
-          kPct: s.atBats > 0 ? (parseFloat(s.strikeOuts) / parseFloat(s.atBats)) : LG.kPct,
-          bbPct: s.plateAppearances > 0 ? (parseFloat(s.baseOnBalls) / parseFloat(s.plateAppearances)) : LG.bbPct,
-          ops: parseFloat(s.ops) || (LG.obp + LG.slg),
-          avg: parseFloat(s.avg) || 0.250,
-          pa: parseFloat(s.plateAppearances) || 0,
-        };
-      } catch { return { name, hand, obp: LG.obp, slg: LG.slg, woba: LG.woba, kPct: LG.kPct, bbPct: LG.bbPct }; }
-    }));
-
-    return batterStats;
+      const stats = p?.seasonStats?.batting;
+      return {
+        name: p?.person?.fullName || "Unknown",
+        hand: p?.person?.batSide?.code || "R",
+        obp: parseFloat(stats?.obp) || LG.obp,
+        slg: parseFloat(stats?.slg) || LG.slg,
+        kPct: LG.kPct,
+        bbPct: LG.bbPct,
+      };
+    });
   } catch { return null; }
 }
 
 // =========================================================================
 // WEATHER
 // =========================================================================
-
-async function fetchWeather(gameId) {
-  try {
-    const res = await fetch(`${MLB_GAME_URL}/${gameId}/feed/live`);
-    const data = await res.json();
-    const weather = data?.gameData?.weather;
-    if (!weather) return null;
-    return {
-      temp: parseInt(weather.temp) || null,
-      wind: weather.wind || "",
-      condition: weather.condition || "",
-    };
-  } catch { return null; }
-}
 
 function parseWind(windStr) {
   if (!windStr) return { speed: 0, direction: "" };
@@ -240,55 +226,57 @@ function parseWind(windStr) {
 }
 
 // =========================================================================
-// ENHANCED MODEL
+// MODEL — uses FanGraphs projections when available
 // =========================================================================
 
-function estimatePZero(pitcher, parkFactor, isHomeBatting, lineup, weather, homeAbbr) {
+function estimatePZero(proj, parkFactor, isHomeBatting, lineup, weather, homeAbbr) {
   const baseP = 1 - LG.scoringPct;
   let lo = Math.log(baseP / (1 - baseP));
 
-  // --- PITCHER STATS ---
-  const fi = pitcher?.firstInning;
-  const ss = pitcher?.season;
+  // --- PITCHER (FanGraphs projections or live MLB stats) ---
+  if (proj) {
+    const hasProjections = proj.fip != null; // FanGraphs has FIP, live stats don't
+    const ip = proj.ip || 0;
 
-  if (fi && fi.ip >= 5) {
-    // Use first-inning splits (strongest signal)
-    const fiWeight = Math.min(fi.ip / 20, 0.7); // cap FI weight, blend with season
-    const sWeight = ss ? Math.min(ss.ip / 80, 1) : 0;
+    if (hasProjections) {
+      // FanGraphs projections: FIP is primary
+      const fip = proj.fip ?? LG.fip;
+      const era = proj.era ?? LG.era;
+      const whip = proj.whip ?? LG.whip;
+      const k9 = proj.k9 ?? LG.k9;
+      const bb9 = proj.bb9 ?? LG.bb9;
+      const hr9 = proj.hr9 ?? LG.hr9;
 
-    const era = fi.era != null ? (fi.era * fiWeight + (ss?.era || LG.era) * (1 - fiWeight)) : (ss?.era || LG.era);
-    const whip = fi.whip != null ? (fi.whip * fiWeight + (ss?.whip || LG.whip) * (1 - fiWeight)) : (ss?.whip || LG.whip);
-    const k9 = fi.k9 != null ? (fi.k9 * fiWeight + (ss?.k9 || LG.k9) * (1 - fiWeight)) : (ss?.k9 || LG.k9);
-    const bb9 = fi.bb9 != null ? (fi.bb9 * fiWeight + (ss?.bb9 || LG.bb9) * (1 - fiWeight)) : (ss?.bb9 || LG.bb9);
-    const hr9 = fi.hr9 != null ? (fi.hr9 * fiWeight + (ss?.hr9 || LG.hr9) * (1 - fiWeight)) : (ss?.hr9 || LG.hr9);
+      lo += (LG.fip - fip) * 0.10;
+      lo += (LG.era - era) * 0.04;
+      lo += (LG.whip - whip) * 0.30;
+      lo += (k9 - LG.k9) * 0.02;
+      lo += (LG.bb9 - bb9) * 0.03;
+      lo += (LG.hr9 - hr9) * 0.05;
 
-    // Regress toward league average based on total sample
-    const regW = Math.min((fi.ip + (ss?.ip || 0)) / 100, 1);
-    const rEra = era * regW + LG.era * (1 - regW);
-    const rWhip = whip * regW + LG.whip * (1 - regW);
-    const rK9 = k9 * regW + LG.k9 * (1 - regW);
-    const rBb9 = bb9 * regW + LG.bb9 * (1 - regW);
-    const rHr9 = hr9 * regW + LG.hr9 * (1 - regW);
+      if (proj.xfip) lo += (LG.fip - proj.xfip) * 0.02;
+      if (proj.siera) lo += (LG.era - proj.siera) * 0.02;
+    } else {
+      // Live MLB stats: regress toward league average based on IP
+      const weight = Math.min(ip / 80, 1);
+      const era = proj.era ?? LG.era;
+      const whip = proj.whip ?? LG.whip;
+      const k9 = proj.k9 ?? LG.k9;
+      const bb9 = proj.bb9 ?? LG.bb9;
+      const hr9 = proj.hr9 ?? LG.hr9;
 
-    lo += (LG.era - rEra) * 0.18;
-    lo += (LG.whip - rWhip) * 0.9;
-    lo += (rK9 - LG.k9) * 0.05;
-    lo += (LG.bb9 - rBb9) * 0.07;
-    lo += (LG.hr9 - rHr9) * 0.12;
-  } else if (ss && ss.ip > 0) {
-    // Season stats only (no FI splits available)
-    const weight = Math.min(ss.ip / 80, 1);
-    const wEra = ss.era * weight + LG.era * (1 - weight);
-    const wWhip = ss.whip * weight + LG.whip * (1 - weight);
-    const wK9 = ss.k9 * weight + LG.k9 * (1 - weight);
-    const wBb9 = ss.bb9 * weight + LG.bb9 * (1 - weight);
-    const wHr9 = ss.hr9 * weight + LG.hr9 * (1 - weight);
+      const wEra = era * weight + LG.era * (1 - weight);
+      const wWhip = whip * weight + LG.whip * (1 - weight);
+      const wK9 = k9 * weight + LG.k9 * (1 - weight);
+      const wBb9 = bb9 * weight + LG.bb9 * (1 - weight);
+      const wHr9 = hr9 * weight + LG.hr9 * (1 - weight);
 
-    lo += (LG.era - wEra) * 0.15;
-    lo += (LG.whip - wWhip) * 0.8;
-    lo += (wK9 - LG.k9) * 0.04;
-    lo += (LG.bb9 - wBb9) * 0.06;
-    lo += (LG.hr9 - wHr9) * 0.10;
+      lo += (LG.era - wEra) * 0.07;
+      lo += (LG.whip - wWhip) * 0.35;
+      lo += (wK9 - LG.k9) * 0.02;
+      lo += (LG.bb9 - wBb9) * 0.03;
+      lo += (LG.hr9 - wHr9) * 0.05;
+    }
   }
 
   // --- LINEUP (top 4 batters) ---
@@ -298,34 +286,27 @@ function estimatePZero(pitcher, parkFactor, isHomeBatting, lineup, weather, home
     const avgKPct = lineup.reduce((s, b) => s + (b.kPct || LG.kPct), 0) / lineup.length;
     const avgBbPct = lineup.reduce((s, b) => s + (b.bbPct || LG.bbPct), 0) / lineup.length;
 
-    // Better hitters = lower P(0 runs)
-    lo -= (avgObp - LG.obp) * 3.5;
-    lo -= (avgSlg - LG.slg) * 1.5;
-    lo += (avgKPct - LG.kPct) * 0.8; // high-K lineup helps pitcher
-    lo -= (avgBbPct - LG.bbPct) * 1.0;
+    lo -= (avgObp - LG.obp) * 1.8;
+    lo -= (avgSlg - LG.slg) * 0.7;
+    lo += (avgKPct - LG.kPct) * 0.4;
+    lo -= (avgBbPct - LG.bbPct) * 0.5;
   }
 
   // --- PARK FACTOR ---
-  lo -= ((parkFactor || 1.0) - 1.0) * 1.5;
+  lo -= ((parkFactor || 1.0) - 1.0) * 0.8;
 
   // --- WEATHER ---
   if (weather) {
-    // Temperature: warmer = ball carries further
     if (weather.temp != null) {
-      const tempDiff = (weather.temp - 72) / 100; // baseline 72°F
-      lo -= tempDiff * 0.3;
+      lo -= ((weather.temp - 72) / 100) * 0.15;
     }
-
-    // Wind
     const wind = parseWind(weather.wind);
     const sensitivity = WIND_PARK_SENSITIVITY[homeAbbr] || 0.5;
     if (wind.direction === "out" && wind.speed > 5) {
-      lo -= (wind.speed / 100) * sensitivity * 1.5; // wind out = more runs
+      lo -= (wind.speed / 100) * sensitivity * 0.8;
     } else if (wind.direction === "in" && wind.speed > 5) {
-      lo += (wind.speed / 100) * sensitivity * 1.0; // wind in = fewer runs
+      lo += (wind.speed / 100) * sensitivity * 0.5;
     }
-
-    // Dome / indoor parks unaffected (weather usually not reported or shows 0 wind)
   }
 
   // --- HOME/AWAY ---
@@ -335,7 +316,7 @@ function estimatePZero(pitcher, parkFactor, isHomeBatting, lineup, weather, home
 }
 
 // =========================================================================
-// DATA FETCHING
+// SCHEDULE
 // =========================================================================
 
 async function fetchGames(dateStr) {
@@ -361,9 +342,7 @@ function BarCell({ value, color }) {
       <div style={{ flex: 1, height: 8, background: "var(--bar-bg)", borderRadius: 4, overflow: "hidden" }}>
         <div style={{ width: `${value * 100}%`, height: "100%", background: color, borderRadius: 4, transition: "width 0.4s ease" }} />
       </div>
-      <span style={{ fontSize: 13, fontWeight: 600, minWidth: 44, textAlign: "right" }}>
-        {(value * 100).toFixed(1)}%
-      </span>
+      <span style={{ fontSize: 13, fontWeight: 600, minWidth: 44, textAlign: "right" }}>{(value * 100).toFixed(1)}%</span>
     </div>
   );
 }
@@ -372,7 +351,7 @@ function Spinner() {
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 80, gap: 16 }}>
       <div style={{ width: 36, height: 36, border: "3px solid var(--border)", borderTopColor: "var(--accent)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-      <div style={{ color: "var(--muted)", fontSize: 14 }}>Loading games, pitcher splits, lineups & weather...</div>
+      <div style={{ color: "var(--muted)", fontSize: 14 }}>Loading games, lineups & weather...</div>
     </div>
   );
 }
@@ -404,7 +383,6 @@ function WeatherBadge({ weather }) {
   const tempColor = weather.temp > 85 ? "var(--red)" : weather.temp < 55 ? "var(--accent)" : "var(--muted)";
   const windIcon = wind.direction === "out" ? "\u2197" : wind.direction === "in" ? "\u2199" : "\u2194";
   const windColor = wind.direction === "out" && wind.speed > 10 ? "var(--red)" : wind.direction === "in" && wind.speed > 10 ? "var(--green)" : "var(--muted)";
-
   return (
     <div style={{ fontSize: 11, lineHeight: 1.5 }}>
       <span style={{ color: tempColor, fontWeight: 600 }}>{weather.temp}\u00B0F</span>
@@ -419,8 +397,8 @@ function WeatherBadge({ weather }) {
 
 function LineupTooltip({ lineup }) {
   if (!lineup || !lineup.length) return <span style={{ color: "var(--muted)", fontSize: 11 }}>No lineup</span>;
-  const avgObp = (lineup.reduce((s, b) => s + b.obp, 0) / lineup.length);
-  const avgSlg = (lineup.reduce((s, b) => s + b.slg, 0) / lineup.length);
+  const avgObp = lineup.reduce((s, b) => s + b.obp, 0) / lineup.length;
+  const avgSlg = lineup.reduce((s, b) => s + b.slg, 0) / lineup.length;
   return (
     <div style={{ fontSize: 11 }}>
       {lineup.map((b, i) => (
@@ -439,28 +417,76 @@ function LineupTooltip({ lineup }) {
   );
 }
 
-function FiSplitBadge({ fi }) {
-  if (!fi || fi.ip < 2) return <span style={{ color: "var(--muted)", fontSize: 11 }}>No 1st inn data</span>;
-  const eraColor = fi.era < 3.0 ? "var(--green)" : fi.era > 5.5 ? "var(--red)" : "var(--text)";
+function ProjBadge({ proj, name }) {
+  if (!proj) return <span style={{ color: "var(--red)", fontSize: 11 }}>No projection for {name}</span>;
+  const fipColor = proj.fip < 3.2 ? "var(--green)" : proj.fip > 4.5 ? "var(--red)" : "var(--text)";
   return (
     <div style={{ fontSize: 11 }}>
-      <span style={{ color: eraColor, fontWeight: 700 }}>{fi.era?.toFixed(2)} ERA</span>
-      <span style={{ color: "var(--muted)", marginLeft: 6 }}>{fi.whip?.toFixed(2)} WHIP</span>
-      <span style={{ color: "var(--muted)", marginLeft: 6 }}>{fi.ip?.toFixed(1)} IP</span>
-      {fi.curWeight != null && <div style={{ fontSize: 10, color: "var(--border)" }}>
-        {fi.curWeight}% this yr / {100 - fi.curWeight}% last yr
-      </div>}
+      {proj.fip != null && <span style={{ color: fipColor, fontWeight: 700 }}>{proj.fip.toFixed(2)} FIP</span>}
+      {proj.era != null && <span style={{ color: "var(--muted)", marginLeft: 6 }}>{proj.era.toFixed(2)} ERA</span>}
+      {proj.whip != null && <span style={{ color: "var(--muted)", marginLeft: 6 }}>{proj.whip.toFixed(2)} WHIP</span>}
+      {proj.ip != null && <span style={{ color: "var(--border)", marginLeft: 6 }}>{proj.ip.toFixed(0)} IP proj</span>}
     </div>
   );
 }
 
-function SeasonBlendBadge({ pitcher }) {
-  if (!pitcher?.season) return null;
-  const s = pitcher.season;
-  if (s.curWeight == null) return null;
+// =========================================================================
+// CSV UPLOAD COMPONENT
+// =========================================================================
+
+function CSVUploader({ onUpload, projCount }) {
+  const fileRef = useRef(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  const handleFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      const projections = parseFangraphsCSV(text);
+      const count = Object.keys(projections).length;
+      onUpload(projections, count);
+    };
+    reader.readAsText(file);
+  };
+
   return (
-    <div style={{ fontSize: 10, color: "var(--border)", marginTop: 2 }}>
-      Blend: {s.curWeight}% {s.curIP?.toFixed(0)}IP this yr / {100 - s.curWeight}% {s.priorIP?.toFixed(0)}IP last yr
+    <div style={{
+      background: "var(--card)", borderRadius: 12, padding: 16, marginBottom: 18,
+      border: dragOver ? "2px dashed var(--accent)" : "2px dashed var(--border)",
+      transition: "border 0.2s",
+    }}
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>FanGraphs Projections</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+            {projCount > 0
+              ? <span style={{ color: "var(--green)" }}>{"\u2713"} {projCount} pitchers loaded</span>
+              : "Upload a CSV from FanGraphs Projections Leaderboard"
+            }
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button className="btn" onClick={() => fileRef.current?.click()}>
+            {projCount > 0 ? "Replace CSV" : "Upload CSV"}
+          </button>
+          <input ref={fileRef} type="file" accept=".csv" style={{ display: "none" }}
+            onChange={(e) => handleFile(e.target.files[0])} />
+        </div>
+      </div>
+      {projCount === 0 && (
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10, lineHeight: 1.6 }}>
+          <strong>How to get the CSV:</strong> Go to{" "}
+          <span style={{ color: "var(--accent)" }}>fangraphs.com &rarr; Projections &rarr; Pitchers</span>{" "}
+          &rarr; Select Steamer or ZiPS &rarr; Click "Export Data" button. Make sure the CSV includes columns
+          for Name, ERA, FIP, WHIP, K/9, BB/9, HR/9, IP.
+          Optional: xFIP, SIERA. Drag &amp; drop the file here or click Upload.
+        </div>
+      )}
     </div>
   );
 }
@@ -483,6 +509,16 @@ export default function App() {
     return { year: d.getFullYear(), month: d.getMonth() };
   });
 
+  // FanGraphs projections state
+  const [projections, setProjections] = useState({});
+  const [projCount, setProjCount] = useState(0);
+  const [unmatchedPitchers, setUnmatchedPitchers] = useState([]);
+
+  const handleProjectionUpload = (projs, count) => {
+    setProjections(projs);
+    setProjCount(Math.floor(count / 2)); // each pitcher stored under 2 keys (full name + last name)
+  };
+
   const loadGames = useCallback(async (dateStr) => {
     setLoading(true);
     setError(null);
@@ -500,36 +536,41 @@ export default function App() {
         const awayPName = awayPitcherInfo ? awayPitcherInfo.fullName : "TBD";
         const homePName = homePitcherInfo ? homePitcherInfo.fullName : "TBD";
 
-        // Fetch pitcher stats with first-inning splits (current + prior year blend)
-        const selectedYear = parseInt(dateStr.slice(0, 4));
-        let awayPitcher = { season: null, firstInning: null, curSeason: null, priorSeason: null };
-        let homePitcher = { season: null, firstInning: null, curSeason: null, priorSeason: null };
-        if (awayPitcherInfo?.id) awayPitcher = await fetchPitcherStats(awayPitcherInfo.id, selectedYear);
-        if (homePitcherInfo?.id) homePitcher = await fetchPitcherStats(homePitcherInfo.id, selectedYear);
+        // Look up FanGraphs projections, fall back to live MLB stats
+        let awayProj = lookupProjection(projections, awayPName);
+        let homeProj = lookupProjection(projections, homePName);
+        let awaySource = awayProj ? "fangraphs" : "none";
+        let homeSource = homeProj ? "fangraphs" : "none";
 
-        // Fetch lineups (only available for started/completed games usually)
+        // If no projection, pull live stats from MLB API
+        if (!awayProj && awayPitcherInfo?.id) {
+          const live = await fetchLivePitcherStats(awayPitcherInfo.id);
+          if (live && live.ip > 0) { awayProj = live; awaySource = "mlb-live"; }
+        }
+        if (!homeProj && homePitcherInfo?.id) {
+          const live = await fetchLivePitcherStats(homePitcherInfo.id);
+          if (live && live.ip > 0) { homeProj = live; homeSource = "mlb-live"; }
+        }
+
+        // Fetch lineups
         let awayLineup = null, homeLineup = null;
         try {
           awayLineup = await fetchLineup(g.gamePk, "away");
           homeLineup = await fetchLineup(g.gamePk, "home");
         } catch {}
 
-        // Fetch weather
+        // Weather
         let weather = null;
-        try {
-          weather = await fetchWeather(g.gamePk);
-        } catch {}
-        // Also try inline weather from schedule
-        if (!weather && g.weather) {
+        if (g.weather) {
           weather = { temp: parseInt(g.weather.temp) || null, wind: g.weather.wind || "", condition: g.weather.condition || "" };
         }
 
         const parkFactor = PARK_FACTORS[homeAbbr] || 1.0;
 
         // Top of 1st: away batters vs home pitcher
-        const topP = estimatePZero(homePitcher, parkFactor, false, awayLineup, weather, homeAbbr);
+        const topP = estimatePZero(homeProj, parkFactor, false, awayLineup, weather, homeAbbr);
         // Bot of 1st: home batters vs away pitcher
-        const botP = estimatePZero(awayPitcher, parkFactor, true, homeLineup, weather, homeAbbr);
+        const botP = estimatePZero(awayProj, parkFactor, true, homeLineup, weather, homeAbbr);
         const pNrfi = topP * botP;
 
         const status = g.status?.detailedState || "Scheduled";
@@ -546,18 +587,27 @@ export default function App() {
 
         return {
           away: awayAbbr, home: homeAbbr, awayP: awayPName, homeP: homePName,
-          awayPitcher, homePitcher, awayLineup, homeLineup, weather,
+          awayProj, homeProj, awaySource, homeSource, awayLineup, homeLineup, weather,
           pNrfi, pYrfi: 1 - pNrfi, topP, botP, parkFactor,
           status, gameTime, actual1stRuns,
           hasPitchers: awayPName !== "TBD" && homePName !== "TBD",
           hasLineups: (awayLineup?.length > 0) && (homeLineup?.length > 0),
+          hasProj: awayProj != null && homeProj != null,
         };
       }));
+
+      // Track unmatched pitchers
+      const unmatched = [];
+      processed.forEach(g => {
+        if (g.awayP !== "TBD" && !g.awayProj && projCount > 0) unmatched.push(g.awayP);
+        if (g.homeP !== "TBD" && !g.homeProj && projCount > 0) unmatched.push(g.homeP);
+      });
+      setUnmatchedPitchers([...new Set(unmatched)]);
 
       setGames(processed);
     } catch (e) { setError(e.message); }
     setLoading(false);
-  }, []);
+  }, [projections, projCount]);
 
   useEffect(() => { loadGames(selectedDate); }, [selectedDate, loadGames]);
 
@@ -566,6 +616,7 @@ export default function App() {
     if (filter === "pitchers") d = d.filter(g => g.hasPitchers);
     if (filter === "pre") d = d.filter(g => !["Final","In Progress"].includes(g.status));
     if (filter === "lineups") d = d.filter(g => g.hasLineups);
+    if (filter === "proj") d = d.filter(g => g.hasProj);
     if (sort === "nrfi") d.sort((a, b) => b.pNrfi - a.pNrfi);
     else if (sort === "yrfi") d.sort((a, b) => b.pYrfi - a.pYrfi);
     else if (sort === "time") d.sort((a, b) => a.gameTime.localeCompare(b.gameTime));
@@ -576,6 +627,7 @@ export default function App() {
   const avgNrfi = games.length ? games.reduce((s, g) => s + g.pNrfi, 0) / games.length : 0;
   const withPitchers = games.filter(g => g.hasPitchers).length;
   const withLineups = games.filter(g => g.hasLineups).length;
+  const withProj = games.filter(g => g.hasProj).length;
   const finished = games.filter(g => g.actual1stRuns !== null);
   const actualRate = finished.length ? finished.filter(g => g.actual1stRuns === 0).length / finished.length : null;
 
@@ -617,7 +669,7 @@ export default function App() {
       <div className="hdr">
         <div>
           <div className="title">NRFI / YRFI Model</div>
-          <div className="sub">Live First-Inning Pricing &middot; Pitcher Splits + Lineups + Weather</div>
+          <div className="sub">FanGraphs Projections + Lineups + Weather</div>
         </div>
         <div className="date-nav">
           <button onClick={() => changeDate(-1)}>&larr;</button>
@@ -655,9 +707,24 @@ export default function App() {
         </div>
       </div>
 
+      {/* CSV Upload */}
+      <CSVUploader onUpload={handleProjectionUpload} projCount={projCount} />
+
+      {/* Unmatched pitcher warning */}
+      {unmatchedPitchers.length > 0 && (
+        <div style={{ background: "rgba(234,179,8,0.1)", border: "1px solid rgba(234,179,8,0.3)", borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 12 }}>
+          <span style={{ color: "#eab308", fontWeight: 700 }}>{"\u26A0"} Unmatched pitchers:</span>
+          <span style={{ color: "var(--muted)", marginLeft: 6 }}>{unmatchedPitchers.join(", ")}</span>
+          <div style={{ color: "var(--muted)", marginTop: 4, fontSize: 11 }}>
+            These pitchers weren't found in your CSV. They'll use league-average projections. Check that names match exactly.
+          </div>
+        </div>
+      )}
+
+      {/* Stats row */}
       <div className="stats">
         <div className="stat"><div className="stat-label">Games</div><div className="stat-val">{games.length}</div></div>
-        <div className="stat"><div className="stat-label">Pitchers</div><div className="stat-val">{withPitchers}/{games.length}</div></div>
+        <div className="stat"><div className="stat-label">Proj Matched</div><div className="stat-val" style={{color: withProj === games.length && games.length > 0 ? "var(--green)" : "var(--text)"}}>{withProj}/{games.length}</div></div>
         <div className="stat"><div className="stat-label">Lineups</div><div className="stat-val">{withLineups}/{games.length}</div></div>
         <div className="stat"><div className="stat-label">Avg NRFI</div><div className="stat-val">{games.length ? `${(avgNrfi*100).toFixed(1)}%` : "\u2014"}</div></div>
         <div className="stat"><div className="stat-label">Actual NRFI</div><div className="stat-val">{actualRate !== null ? `${(actualRate*100).toFixed(0)}%` : "\u2014"}</div>
@@ -665,8 +732,9 @@ export default function App() {
         </div>
       </div>
 
+      {/* Tabs */}
       <div className="tabs">
-        {[["slate","Full Slate"],["half","Half-Inning"],["lineups","Lineups"],["pitchers","Pitcher Stats"],["weather","Weather"]].map(([k,l]) =>
+        {[["slate","Full Slate"],["half","Half-Inning"],["lineups","Lineups"],["projections","Projections"],["weather","Weather"]].map(([k,l]) =>
           <div key={k} className={`tab ${tab===k?"active":""}`} onClick={() => setTab(k)}>{l}</div>
         )}
       </div>
@@ -677,7 +745,7 @@ export default function App() {
         <div style={{textAlign:"center",padding:60,color:"var(--muted)"}}>No games scheduled for this date.</div>
       ) : <>
 
-        {/* ========== FULL SLATE ========== */}
+        {/* FULL SLATE */}
         {tab === "slate" && <>
           <div className="controls">
             <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>Sort:</span>
@@ -685,7 +753,7 @@ export default function App() {
               <button key={k} className={`btn ${sort===k?"active":""}`} onClick={() => setSort(k)}>{l}</button>
             )}
             <span style={{fontSize:12,color:"var(--muted)",marginLeft:12,marginRight:4}}>Show:</span>
-            {[["all","All"],["pitchers","Pitchers"],["lineups","Lineups"],["pre","Upcoming"]].map(([k,l]) =>
+            {[["all","All"],["proj","Has Proj"],["lineups","Lineups"],["pre","Upcoming"]].map(([k,l]) =>
               <button key={k} className={`btn ${filter===k?"active":""}`} onClick={() => setFilter(k)}>{l}</button>
             )}
           </div>
@@ -709,11 +777,13 @@ export default function App() {
                   <td className="odds">{probToAmerican(g.pYrfi)}</td>
                   <td><span style={{color:g.parkFactor>1.03?"var(--red)":g.parkFactor<0.95?"var(--green)":"var(--muted)",fontWeight:600,fontSize:13}}>{g.parkFactor.toFixed(2)}</span></td>
                   <td>
-                    <div style={{display:"flex",gap:4}}>
-                      {g.hasPitchers && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(59,130,246,0.15)",color:"var(--accent)",fontWeight:600}}>P</span>}
-                      {g.homePitcher?.firstInning?.ip > 2 && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(168,85,247,0.15)",color:"#a855f7",fontWeight:600}}>1st</span>}
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                      {g.awaySource === "fangraphs" && g.homeSource === "fangraphs" && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(168,85,247,0.15)",color:"#a855f7",fontWeight:600}}>FG</span>}
+                      {(g.awaySource === "mlb-live" || g.homeSource === "mlb-live") && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(59,130,246,0.15)",color:"var(--accent)",fontWeight:600}}>LIVE</span>}
+                      {(g.awaySource === "fangraphs" && g.homeSource === "mlb-live") || (g.awaySource === "mlb-live" && g.homeSource === "fangraphs") ? <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(234,179,8,0.15)",color:"#eab308",fontWeight:600}}>MIX</span> : null}
                       {g.hasLineups && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(34,197,94,0.15)",color:"var(--green)",fontWeight:600}}>LU</span>}
                       {g.weather?.temp && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(234,179,8,0.15)",color:"#eab308",fontWeight:600}}>W</span>}
+                      {g.awaySource === "none" && g.homeSource === "none" && g.hasPitchers && <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(239,68,68,0.12)",color:"var(--red)",fontWeight:600}}>NO DATA</span>}
                     </div>
                   </td>
                   <td><StatusPill status={g.status} /></td>
@@ -724,7 +794,7 @@ export default function App() {
           </div>
         </>}
 
-        {/* ========== HALF-INNING ========== */}
+        {/* HALF-INNING */}
         {tab === "half" && <div className="card" style={{overflowX:"auto"}}>
           <table>
             <thead><tr><th>Game</th><th>Top 1st P(0R)</th><th>Bot 1st P(0R)</th><th>Combined</th><th>Weakest Half</th><th>Result</th></tr></thead>
@@ -745,7 +815,7 @@ export default function App() {
           </table>
         </div>}
 
-        {/* ========== LINEUPS ========== */}
+        {/* LINEUPS */}
         {tab === "lineups" && <div style={{display:"grid",gap:12}}>
           {games.map((g,i) => (
             <div key={i} className="card" style={{padding:16}}>
@@ -761,15 +831,11 @@ export default function App() {
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
                 <div>
-                  <div style={{fontSize:12,fontWeight:700,color:"var(--muted)",marginBottom:6}}>
-                    {g.away} LINEUP (vs {g.homeP})
-                  </div>
+                  <div style={{fontSize:12,fontWeight:700,color:"var(--muted)",marginBottom:6}}>{g.away} LINEUP (vs {g.homeP})</div>
                   <LineupTooltip lineup={g.awayLineup} />
                 </div>
                 <div>
-                  <div style={{fontSize:12,fontWeight:700,color:"var(--muted)",marginBottom:6}}>
-                    {g.home} LINEUP (vs {g.awayP})
-                  </div>
+                  <div style={{fontSize:12,fontWeight:700,color:"var(--muted)",marginBottom:6}}>{g.home} LINEUP (vs {g.awayP})</div>
                   <LineupTooltip lineup={g.homeLineup} />
                 </div>
               </div>
@@ -777,52 +843,57 @@ export default function App() {
           ))}
         </div>}
 
-        {/* ========== PITCHER STATS ========== */}
-        {tab === "pitchers" && <div className="card" style={{overflowX:"auto"}}>
-          <table>
-            <thead><tr><th>Game</th><th>Pitcher</th><th>ERA</th><th>WHIP</th><th>K/9</th><th>BB/9</th><th>HR/9</th><th>IP</th><th>1st Inning Splits</th></tr></thead>
-            <tbody>{games.flatMap((g,i) => [
-              <tr key={`a${i}`} style={{background:"rgba(139,92,246,0.04)"}}>
-                <td rowSpan={2}><div className="team">{g.away} @ {g.home}</div></td>
-                <td>
-                  <div style={{fontWeight:600}}>{g.awayP}</div>
-                  <div style={{fontSize:11,color:"var(--muted)"}}>Away</div>
-                  <SeasonBlendBadge pitcher={g.awayPitcher} />
-                </td>
-                <td style={{fontWeight:600}}>{g.awayPitcher?.season?.era?.toFixed(2) ?? "\u2014"}</td>
-                <td>{g.awayPitcher?.season?.whip?.toFixed(2) ?? "\u2014"}</td>
-                <td>{g.awayPitcher?.season?.k9?.toFixed(1) ?? "\u2014"}</td>
-                <td>{g.awayPitcher?.season?.bb9?.toFixed(1) ?? "\u2014"}</td>
-                <td>{g.awayPitcher?.season?.hr9?.toFixed(1) ?? "\u2014"}</td>
-                <td>{g.awayPitcher?.season?.ip?.toFixed(1) ?? "\u2014"}</td>
-                <td><FiSplitBadge fi={g.awayPitcher?.firstInning} /></td>
-              </tr>,
-              <tr key={`h${i}`}>
-                <td>
-                  <div style={{fontWeight:600}}>{g.homeP}</div>
-                  <div style={{fontSize:11,color:"var(--muted)"}}>Home</div>
-                  <SeasonBlendBadge pitcher={g.homePitcher} />
-                </td>
-                <td style={{fontWeight:600}}>{g.homePitcher?.season?.era?.toFixed(2) ?? "\u2014"}</td>
-                <td>{g.homePitcher?.season?.whip?.toFixed(2) ?? "\u2014"}</td>
-                <td>{g.homePitcher?.season?.k9?.toFixed(1) ?? "\u2014"}</td>
-                <td>{g.homePitcher?.season?.bb9?.toFixed(1) ?? "\u2014"}</td>
-                <td>{g.homePitcher?.season?.hr9?.toFixed(1) ?? "\u2014"}</td>
-                <td>{g.homePitcher?.season?.ip?.toFixed(1) ?? "\u2014"}</td>
-                <td><FiSplitBadge fi={g.homePitcher?.firstInning} /></td>
-              </tr>
-            ])}</tbody>
-          </table>
+        {/* PROJECTIONS */}
+        {tab === "projections" && <div className="card" style={{overflowX:"auto"}}>
+          {projCount === 0 ? (
+            <div style={{textAlign:"center",padding:40,color:"var(--muted)"}}>
+              <div>No FanGraphs CSV uploaded yet. Using live MLB stats as the data source.</div>
+              <div style={{marginTop:8,fontSize:11}}>Upload a CSV above for projection-based pricing.</div>
+            </div>
+          ) : null}
+            <table>
+              <thead><tr><th>Game</th><th>Pitcher</th><th>Source</th><th>FIP</th><th>ERA</th><th>WHIP</th><th>K/9</th><th>BB/9</th><th>HR/9</th><th>IP</th></tr></thead>
+              <tbody>{games.flatMap((g,i) => {
+                const srcBadge = (src) => {
+                  if (src === "fangraphs") return <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(168,85,247,0.15)",color:"#a855f7",fontWeight:600}}>FanGraphs</span>;
+                  if (src === "mlb-live") return <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(59,130,246,0.15)",color:"var(--accent)",fontWeight:600}}>MLB Live</span>;
+                  return <span style={{fontSize:10,padding:"1px 5px",borderRadius:4,background:"rgba(239,68,68,0.12)",color:"var(--red)",fontWeight:600}}>League Avg</span>;
+                };
+                return [
+                <tr key={`a${i}`} style={{background:"rgba(139,92,246,0.04)"}}>
+                  <td rowSpan={2}><div className="team">{g.away} @ {g.home}</div></td>
+                  <td><div style={{fontWeight:600}}>{g.awayP}</div></td>
+                  <td>{srcBadge(g.awaySource)}</td>
+                  <td style={{fontWeight:700,color:g.awayProj?.fip < 3.2 ? "var(--green)" : g.awayProj?.fip > 4.5 ? "var(--red)" : "var(--text)"}}>{g.awayProj?.fip?.toFixed(2) ?? "\u2014"}</td>
+                  <td>{g.awayProj?.era?.toFixed(2) ?? "\u2014"}</td>
+                  <td>{g.awayProj?.whip?.toFixed(2) ?? "\u2014"}</td>
+                  <td>{g.awayProj?.k9?.toFixed(1) ?? "\u2014"}</td>
+                  <td>{g.awayProj?.bb9?.toFixed(1) ?? "\u2014"}</td>
+                  <td>{g.awayProj?.hr9?.toFixed(1) ?? "\u2014"}</td>
+                  <td>{g.awayProj?.ip?.toFixed(0) ?? "\u2014"}</td>
+                </tr>,
+                <tr key={`h${i}`}>
+                  <td><div style={{fontWeight:600}}>{g.homeP}</div></td>
+                  <td>{srcBadge(g.homeSource)}</td>
+                  <td style={{fontWeight:700,color:g.homeProj?.fip < 3.2 ? "var(--green)" : g.homeProj?.fip > 4.5 ? "var(--red)" : "var(--text)"}}>{g.homeProj?.fip?.toFixed(2) ?? "\u2014"}</td>
+                  <td>{g.homeProj?.era?.toFixed(2) ?? "\u2014"}</td>
+                  <td>{g.homeProj?.whip?.toFixed(2) ?? "\u2014"}</td>
+                  <td>{g.homeProj?.k9?.toFixed(1) ?? "\u2014"}</td>
+                  <td>{g.homeProj?.bb9?.toFixed(1) ?? "\u2014"}</td>
+                  <td>{g.homeProj?.hr9?.toFixed(1) ?? "\u2014"}</td>
+                  <td>{g.homeProj?.ip?.toFixed(0) ?? "\u2014"}</td>
+                </tr>
+              ];})}</tbody>
+            </table>
         </div>}
 
-        {/* ========== WEATHER ========== */}
+        {/* WEATHER */}
         {tab === "weather" && <div className="card" style={{overflowX:"auto"}}>
           <table>
             <thead><tr><th>Game</th><th>Weather</th><th>Park Factor</th><th>Wind Impact</th><th>P(NRFI)</th><th>Result</th></tr></thead>
             <tbody>{[...games].sort((a,b) => b.pNrfi - a.pNrfi).map((g,i) => {
               const wind = parseWind(g.weather?.wind);
-              let impact = "Neutral";
-              let impactColor = "var(--muted)";
+              let impact = "Neutral", impactColor = "var(--muted)";
               if (wind.direction === "out" && wind.speed > 10) { impact = "Favors YRFI"; impactColor = "var(--red)"; }
               else if (wind.direction === "in" && wind.speed > 10) { impact = "Favors NRFI"; impactColor = "var(--green)"; }
               else if (g.weather?.temp > 85) { impact = "Hot (more HR)"; impactColor = "var(--red)"; }
@@ -844,11 +915,12 @@ export default function App() {
       </>}
 
       <div style={{marginTop:20,padding:16,background:"var(--card)",borderRadius:10,fontSize:12,color:"var(--muted)",lineHeight:1.6}}>
-        <strong style={{color:"var(--text)"}}>Model inputs:</strong> Pitcher season stats + first-inning splits (blended by IP),
-        top-of-order lineup OBP/SLG/K%/BB%, park run factors, temperature, wind speed &amp; direction.
-        Stats regressed toward league average based on sample size. P(NRFI) = P(0R top 1st) &times; P(0R bot 1st).
-        Data badges: <span style={{color:"var(--accent)"}}>P</span> = pitchers listed,
-        <span style={{color:"#a855f7)",marginLeft:2}}>1st</span> = first-inning splits available,
+        <strong style={{color:"var(--text)"}}>Model inputs:</strong> FanGraphs pitcher projections when available (FIP primary, ERA/WHIP/K&#8725;9/BB&#8725;9/HR&#8725;9 secondary),
+        falling back to live MLB season stats with sample-size regression when no projection is loaded.
+        Also uses top-of-order lineup OBP/SLG, park run factors, temperature, wind speed &amp; direction.
+        P(NRFI) = P(0R top 1st) &times; P(0R bot 1st).
+        Data badges: <span style={{color:"#a855f7"}}>FG</span> = FanGraphs projection,
+        <span style={{color:"var(--accent)",marginLeft:2}}>LIVE</span> = MLB season stats,
         <span style={{color:"var(--green)",marginLeft:2}}>LU</span> = lineups confirmed,
         <span style={{color:"#eab308",marginLeft:2}}>W</span> = weather data.
         Model output only &mdash; not financial advice.
